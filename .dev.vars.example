@@ -1,0 +1,5 @@
+SLACK_SIGNING_SECRET=replace_with_slack_signing_secret
+SLACK_BOT_TOKEN=xoxb-replace-with-bot-token
+ANTHROPIC_API_KEY=sk-ant-replace-with-key
+VOLLNA_BOT_ID=B0XXXXXXXXX
+TARGET_CHANNEL_ID=C0XXXXXXXXX
