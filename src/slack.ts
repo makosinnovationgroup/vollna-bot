@@ -82,10 +82,17 @@ export async function fetchMessage(
     headers: { Authorization: `Bearer ${env.SLACK_BOT_TOKEN}` },
   });
 
-  if (!resp.ok) return null;
+  if (!resp.ok) {
+    console.error('fetchMessage HTTP error', resp.status);
+    return null;
+  }
 
   const data = (await resp.json()) as ConversationsHistoryResponse;
-  if (!data.ok || !data.messages || data.messages.length === 0) return null;
+  if (!data.ok) {
+    console.error('fetchMessage Slack error', data.error);
+    return null;
+  }
+  if (!data.messages || data.messages.length === 0) return null;
   return data.messages[0];
 }
 
@@ -95,7 +102,7 @@ export async function postReply(
   text: string,
   env: Env,
 ): Promise<void> {
-  await fetch('https://slack.com/api/chat.postMessage', {
+  const resp = await fetch('https://slack.com/api/chat.postMessage', {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${env.SLACK_BOT_TOKEN}`,
@@ -103,4 +110,13 @@ export async function postReply(
     },
     body: JSON.stringify({ channel, thread_ts: threadTs, text }),
   });
+
+  if (!resp.ok) {
+    throw new Error(`Slack postMessage HTTP ${resp.status}`);
+  }
+
+  const data = (await resp.json()) as { ok: boolean; error?: string };
+  if (!data.ok) {
+    throw new Error(`Slack postMessage error: ${data.error ?? 'unknown'}`);
+  }
 }
