@@ -6,12 +6,24 @@ export interface SlackAttachment {
   fallback?: string;
 }
 
+export interface SlackBlockText {
+  type: string;
+  text: string;
+}
+
+export interface SlackBlock {
+  type: string;
+  block_id?: string;
+  text?: SlackBlockText;
+}
+
 export interface SlackMessage {
   ts: string;
   text?: string;
   bot_id?: string;
   user?: string;
   attachments?: SlackAttachment[];
+  blocks?: SlackBlock[];
 }
 
 interface ConversationsHistoryResponse {
@@ -92,13 +104,7 @@ export async function fetchMessage(
     console.error('fetchMessage Slack error', data.error);
     return null;
   }
-  if (!data.messages || data.messages.length === 0) {
-    console.warn(
-      'vollna: conversations.history returned no messages',
-      JSON.stringify(data),
-    );
-    return null;
-  }
+  if (!data.messages || data.messages.length === 0) return null;
   return data.messages[0];
 }
 

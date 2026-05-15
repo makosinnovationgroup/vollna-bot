@@ -45,22 +45,14 @@ export default {
       return new Response('method not allowed', { status: 405 });
     }
 
-    const retryNum = req.headers.get('x-slack-retry-num');
-    if (retryNum) {
-      console.log('vollna skip: slack retry', {
-        retryNum,
-        reason: req.headers.get('x-slack-retry-reason'),
-      });
+    if (req.headers.get('x-slack-retry-num')) {
       return new Response('ok', { status: 200 });
     }
 
     const body = await req.text();
 
     const ok = await verifySignature(req, body, env.SLACK_SIGNING_SECRET);
-    if (!ok) {
-      console.warn('vollna: signature verification failed');
-      return new Response('invalid signature', { status: 401 });
-    }
+    if (!ok) return new Response('invalid signature', { status: 401 });
 
     let payload: SlackPayload;
     try {
@@ -89,71 +81,31 @@ export default {
 
 async function handleEvent(event: ReactionAddedEvent, env: Env): Promise<void> {
   try {
-    console.log('vollna event', JSON.stringify(event));
-
     if (event.type !== 'reaction_added') return;
-    if (event.reaction !== '+1') {
-      console.log('vollna skip: reaction is not +1', event.reaction);
-      return;
-    }
-    if (!event.item || event.item.type !== 'message') {
-      console.log('vollna skip: reacted item is not a message', event.item?.type);
-      return;
-    }
-    if (event.item.channel !== env.TARGET_CHANNEL_ID) {
-      console.log('vollna skip: wrong channel', {
-        got: event.item.channel,
-        expected: env.TARGET_CHANNEL_ID,
-      });
-      return;
-    }
+    if (event.reaction !== '+1') return;
+    if (!event.item || event.item.type !== 'message') return;
+    if (event.item.channel !== env.TARGET_CHANNEL_ID) return;
 
     const channel = event.item.channel;
     const ts = event.item.ts;
     const dedupKey = `done:${channel}:${ts}`;
 
     const seen = await env.DEDUPE.get(dedupKey);
-    if (seen) {
-      console.log('vollna skip: already processed', dedupKey);
-      return;
-    }
+    if (seen) return;
 
     await env.DEDUPE.put(dedupKey, '1', { expirationTtl: DEDUP_TTL_SECONDS });
 
     const message = await fetchMessage(channel, ts, env);
-    if (!message) {
-      console.log('vollna skip: fetchMessage returned null', { channel, ts });
-      return;
-    }
-
-    console.log('vollna debug', JSON.stringify(message));
-
-    console.log('vollna bot_id', {
-      got: message.bot_id ?? null,
-      expected: env.VOLLNA_BOT_ID,
-      match: message.bot_id === env.VOLLNA_BOT_ID,
-    });
-
-    if (message.bot_id !== env.VOLLNA_BOT_ID) {
-      console.log('vollna skip: bot_id mismatch');
-      return;
-    }
+    if (!message) return;
+    if (message.bot_id !== env.VOLLNA_BOT_ID) return;
 
     const jobText = extractJobText(message);
-    if (!jobText) {
-      console.log('vollna skip: no job text extracted from message');
-      return;
-    }
-    console.log('vollna jobText', JSON.stringify(jobText));
+    if (!jobText) return;
 
     const reply = (await generateCoverLetter(jobText, env)).trim();
-    if (!reply || reply === 'SKIP') {
-      console.log('vollna skip: model returned', reply === 'SKIP' ? 'SKIP' : 'empty');
-      return;
-    }
+    if (!reply || reply === 'SKIP') return;
 
     await postReply(channel, ts, reply, env);
-    console.log('vollna posted reply', { channel, ts, replyChars: reply.length });
   } catch (err) {
     console.error('handleEvent failed', {
       channel: event.item?.channel,
@@ -166,7 +118,25 @@ async function handleEvent(event: ReactionAddedEvent, env: Env): Promise<void> {
 
 function extractJobText(message: SlackMessage): string {
   const parts: string[] = [];
-  if (message.text) parts.push(message.text);
+
+  // Vollna posts structured content as Block Kit `blocks`. The job
+  // title, description, screening questions, budget, and client
+  // signals all live in `section` blocks; `actions` and `divider`
+  // blocks carry no proposal-relevant text.
+  if (Array.isArray(message.blocks)) {
+    for (const block of message.blocks) {
+      if (block.type === 'section' && block.text?.text) {
+        parts.push(block.text.text);
+      }
+    }
+  }
+
+  // Fallback for non-Block-Kit messages: the flat `text` field.
+  if (parts.length === 0 && message.text) {
+    parts.push(message.text);
+  }
+
+  // Legacy attachments, kept for backward compatibility.
   if (Array.isArray(message.attachments)) {
     for (const att of message.attachments) {
       if (att.title) parts.push(att.title);
@@ -174,5 +144,6 @@ function extractJobText(message: SlackMessage): string {
       else if (att.fallback) parts.push(att.fallback);
     }
   }
+
   return parts.join('\n\n').trim();
 }
