@@ -39,6 +39,15 @@ type SlackPayload = UrlVerification | EventCallback | { type: string };
 
 const DEDUP_TTL_SECONDS = 60 * 60 * 24 * 7;
 
+// Diagnostic logging toggle. Flip to false to silence the `vollna ...`
+// trace. The structured console.error in handleEvent's catch block is
+// always on regardless of this flag.
+const DEBUG = true;
+
+function debug(...args: unknown[]): void {
+  if (DEBUG) console.log(...args);
+}
+
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     if (req.method !== 'POST') {
@@ -46,13 +55,20 @@ export default {
     }
 
     if (req.headers.get('x-slack-retry-num')) {
+      debug('vollna fetch: slack retry, short-circuiting', {
+        retryNum: req.headers.get('x-slack-retry-num'),
+        reason: req.headers.get('x-slack-retry-reason'),
+      });
       return new Response('ok', { status: 200 });
     }
 
     const body = await req.text();
 
     const ok = await verifySignature(req, body, env.SLACK_SIGNING_SECRET);
-    if (!ok) return new Response('invalid signature', { status: 401 });
+    if (!ok) {
+      debug('vollna fetch: signature verification failed');
+      return new Response('invalid signature', { status: 401 });
+    }
 
     let payload: SlackPayload;
     try {
@@ -60,6 +76,8 @@ export default {
     } catch {
       return new Response('invalid json', { status: 400 });
     }
+
+    debug('vollna fetch: payload type', payload.type);
 
     if (payload.type === 'url_verification') {
       const challenge = (payload as UrlVerification).challenge;
@@ -81,31 +99,70 @@ export default {
 
 async function handleEvent(event: ReactionAddedEvent, env: Env): Promise<void> {
   try {
+    debug('vollna event', JSON.stringify(event));
+
     if (event.type !== 'reaction_added') return;
-    if (event.reaction !== '+1') return;
-    if (!event.item || event.item.type !== 'message') return;
-    if (event.item.channel !== env.TARGET_CHANNEL_ID) return;
+    if (event.reaction !== '+1') {
+      debug('vollna skip: reaction is not +1', event.reaction);
+      return;
+    }
+    if (!event.item || event.item.type !== 'message') {
+      debug('vollna skip: reacted item is not a message', event.item?.type);
+      return;
+    }
+    if (event.item.channel !== env.TARGET_CHANNEL_ID) {
+      debug('vollna skip: wrong channel', {
+        got: event.item.channel,
+        expected: env.TARGET_CHANNEL_ID ?? null,
+      });
+      return;
+    }
 
     const channel = event.item.channel;
     const ts = event.item.ts;
     const dedupKey = `done:${channel}:${ts}`;
 
     const seen = await env.DEDUPE.get(dedupKey);
-    if (seen) return;
+    if (seen) {
+      debug('vollna skip: already processed', dedupKey);
+      return;
+    }
 
     await env.DEDUPE.put(dedupKey, '1', { expirationTtl: DEDUP_TTL_SECONDS });
 
     const message = await fetchMessage(channel, ts, env);
-    if (!message) return;
-    if (message.bot_id !== env.VOLLNA_BOT_ID) return;
+    if (!message) {
+      debug('vollna skip: fetchMessage returned null', { channel, ts });
+      return;
+    }
+
+    debug('vollna message', JSON.stringify(message));
+    debug('vollna bot_id', {
+      got: message.bot_id ?? null,
+      expected: env.VOLLNA_BOT_ID ?? null,
+      match: message.bot_id === env.VOLLNA_BOT_ID,
+    });
+    if (message.bot_id !== env.VOLLNA_BOT_ID) {
+      debug('vollna skip: bot_id mismatch');
+      return;
+    }
 
     const jobText = extractJobText(message);
-    if (!jobText) return;
+    if (!jobText) {
+      debug('vollna skip: empty jobText after extraction');
+      return;
+    }
+    debug('vollna jobText', JSON.stringify(jobText));
 
     const reply = (await generateCoverLetter(jobText, env)).trim();
-    if (!reply || reply === 'SKIP') return;
+    debug('vollna reply', JSON.stringify(reply));
+    if (!reply || reply === 'SKIP') {
+      debug('vollna skip: model returned', reply === 'SKIP' ? 'SKIP' : 'empty');
+      return;
+    }
 
     await postReply(channel, ts, reply, env);
+    debug('vollna posted reply', { channel, ts, replyChars: reply.length });
   } catch (err) {
     console.error('handleEvent failed', {
       channel: event.item?.channel,
