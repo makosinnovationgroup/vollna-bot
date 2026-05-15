@@ -92,7 +92,13 @@ export async function fetchMessage(
     console.error('fetchMessage Slack error', data.error);
     return null;
   }
-  if (!data.messages || data.messages.length === 0) return null;
+  if (!data.messages || data.messages.length === 0) {
+    console.warn(
+      'vollna: conversations.history returned no messages',
+      JSON.stringify(data),
+    );
+    return null;
+  }
   return data.messages[0];
 }
 
