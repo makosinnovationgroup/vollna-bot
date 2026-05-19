@@ -32,6 +32,20 @@ interface ConversationsHistoryResponse {
   error?: string;
 }
 
+interface SlackReaction {
+  name: string;
+  count?: number;
+  users?: string[];
+}
+
+interface ReactionsGetResponse {
+  ok: boolean;
+  error?: string;
+  message?: {
+    reactions?: SlackReaction[];
+  };
+}
+
 export async function verifySignature(
   req: Request,
   body: string,
@@ -131,4 +145,116 @@ export async function postReply(
   if (!data.ok) {
     throw new Error(`Slack postMessage error: ${data.error ?? 'unknown'}`);
   }
+}
+
+export async function postRepost(
+  channel: string,
+  text: string,
+  blocks: SlackBlock[] | undefined,
+  env: Env,
+): Promise<{ ts: string }> {
+  // Vollna's `actions` blocks (Open project / Generate proposal / More)
+  // reference Vollna's own action handlers and are inert when reposted, so
+  // strip them. Section and divider blocks carry the lead content; keep them.
+  const cleaned = Array.isArray(blocks)
+    ? blocks.filter((b) => b.type !== 'actions')
+    : [];
+
+  // Slack requires `text` even when `blocks` are present; it is the
+  // notification/fallback string. Only send `blocks` when there are any.
+  const body: { channel: string; text: string; blocks?: SlackBlock[] } = {
+    channel,
+    text,
+  };
+  if (cleaned.length > 0) {
+    body.blocks = cleaned;
+  }
+
+  const resp = await fetch('https://slack.com/api/chat.postMessage', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${env.SLACK_BOT_TOKEN}`,
+      'Content-Type': 'application/json; charset=utf-8',
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!resp.ok) {
+    throw new Error(`Slack postMessage HTTP ${resp.status}`);
+  }
+
+  const data = (await resp.json()) as {
+    ok: boolean;
+    ts?: string;
+    error?: string;
+  };
+  if (!data.ok) {
+    throw new Error(`Slack postMessage error: ${data.error ?? 'unknown'}`);
+  }
+  if (!data.ts) {
+    throw new Error('Slack postMessage returned no ts');
+  }
+  return { ts: data.ts };
+}
+
+export async function addReaction(
+  channel: string,
+  ts: string,
+  name: string,
+  env: Env,
+): Promise<void> {
+  // Slack's reactions.add expects the message ts under the `timestamp` key,
+  // unlike conversations.history which uses `latest`.
+  const resp = await fetch('https://slack.com/api/reactions.add', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${env.SLACK_BOT_TOKEN}`,
+      'Content-Type': 'application/json; charset=utf-8',
+    },
+    body: JSON.stringify({ channel, timestamp: ts, name }),
+  });
+
+  if (!resp.ok) {
+    throw new Error(`Slack reactions.add HTTP ${resp.status}`);
+  }
+
+  const data = (await resp.json()) as { ok: boolean; error?: string };
+  if (!data.ok) {
+    throw new Error(`Slack reactions.add error: ${data.error ?? 'unknown'}`);
+  }
+}
+
+export async function hasReaction(
+  channel: string,
+  ts: string,
+  name: string,
+  botUserId: string,
+  env: Env,
+): Promise<boolean> {
+  const url = new URL('https://slack.com/api/reactions.get');
+  url.searchParams.set('channel', channel);
+  url.searchParams.set('timestamp', ts);
+
+  const resp = await fetch(url.toString(), {
+    headers: { Authorization: `Bearer ${env.SLACK_BOT_TOKEN}` },
+  });
+
+  if (!resp.ok) {
+    throw new Error(`Slack reactions.get HTTP ${resp.status}`);
+  }
+
+  const data = (await resp.json()) as ReactionsGetResponse;
+  if (!data.ok) {
+    throw new Error(`Slack reactions.get error: ${data.error ?? 'unknown'}`);
+  }
+
+  const reactions = data.message?.reactions;
+  if (!Array.isArray(reactions)) return false;
+
+  return reactions.some(
+    (r) =>
+      r.name === name &&
+      Array.isArray(r.users) &&
+      r.users.includes(botUserId),
+  );
 }
